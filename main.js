@@ -8,9 +8,13 @@
 // konten billing yang tetap update instan seperti versi browser biasa.
 const { app, BrowserWindow, Menu, session, dialog, shell } = require('electron');
 const path = require('path');
+const http = require('http');
+const fs = require('fs');
 const { autoUpdater } = require('electron-updater');
 
 const APP_URL = 'https://gloria-biliard.pages.dev/GloriaBilliard';
+const OFFLINE_BUNDLE_DIR = path.join(__dirname, 'offline-bundle');
+const OFFLINE_MIME = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json' };
 
 // Cegah 2 instance app jalan bersamaan di 1 komputer -- 2 jendela terpisah
 // yg sama-sama sinkron ke cloud bisa membingungkan (mirip 2 tab browser).
@@ -27,6 +31,48 @@ if (!gotLock) {
   });
 
   let mainWindow = null;
+  let usingFallback = false;
+  let fallbackServer = null;
+  let fallbackPort = null;
+
+  // Server statis lokal (127.0.0.1) khusus menyajikan offline-bundle/ --
+  // JARING PENGAMAN DARURAT saja, dipakai loadApp() cuma kalau APP_URL live
+  // gagal dimuat (mis. tidak ada internet). 127.0.0.1 dipilih (bukan file://)
+  // supaya App Check/reCAPTCHA di dalam halaman tetap dilewati dgn benar
+  // (kodenya cek location.hostname==='localhost'||'127.0.0.1'). Lihat
+  // scripts/build-offline-bundle.js utk cara bundel ini dibuat/diperbarui.
+  function startFallbackServer() {
+    return new Promise((resolve, reject) => {
+      if (fallbackServer) { resolve(fallbackPort); return; }
+      fallbackServer = http.createServer((req, res) => {
+        let urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
+        if (urlPath === '/' || urlPath === '/GloriaBilliard') urlPath = '/GloriaBilliard.html';
+        const filePath = path.join(OFFLINE_BUNDLE_DIR, urlPath);
+        if (!filePath.startsWith(OFFLINE_BUNDLE_DIR)) { res.writeHead(403); res.end(); return; }
+        fs.readFile(filePath, (err, data) => {
+          if (err) { res.writeHead(404); res.end('Not found'); return; }
+          res.writeHead(200, { 'Content-Type': OFFLINE_MIME[path.extname(filePath)] || 'application/octet-stream' });
+          res.end(data);
+        });
+      });
+      fallbackServer.on('error', reject);
+      fallbackServer.listen(0, '127.0.0.1', () => {
+        fallbackPort = fallbackServer.address().port;
+        resolve(fallbackPort);
+      });
+    });
+  }
+
+  // Selalu coba versi LIVE dulu (supaya perbaikan bug ttp instan seperti biasa
+  // -- ini prinsip yg sudah disepakati sejak awal proyek shell ini). Cuma
+  // jatuh ke salinan offline lokal kalau navigasi ke APP_URL benar2 gagal,
+  // lewat listener did-fail-load di createWindow(). loadApp() juga dipanggil
+  // ulang oleh menu "Muat Ulang"/Ctrl+R, jadi reload manual = coba online lagi
+  // (cara alami utk "naik" kembali ke versi live begitu internet pulih).
+  function loadApp() {
+    usingFallback = false;
+    mainWindow.loadURL(APP_URL);
+  }
 
   function createWindow() {
     mainWindow = new BrowserWindow({
@@ -44,7 +90,28 @@ if (!gotLock) {
       },
     });
 
-    mainWindow.loadURL(APP_URL);
+    loadApp();
+
+    // Live gagal dimuat (mis. tidak ada internet saat app dibuka) -- jatuh ke
+    // salinan offline lokal. errorCode -3 (ERR_ABORTED) dilewati krn itu efek
+    // samping navigasi normal yg digantikan navigasi lain, bukan gagal betulan.
+    mainWindow.webContents.on('did-fail-load', (_event, errorCode, _errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame || usingFallback || errorCode === -3) return;
+      if (!validatedURL || !validatedURL.startsWith(APP_URL)) return;
+      usingFallback = true;
+      startFallbackServer()
+        .then((port) => { mainWindow.loadURL(`http://127.0.0.1:${port}/GloriaBilliard.html`); })
+        .catch(() => {}); // server lokal pun gagal -- biarkan halaman error bawaan Electron tampil
+    });
+
+    mainWindow.webContents.on('did-finish-load', () => {
+      if (!usingFallback) return;
+      mainWindow.webContents
+        .executeJavaScript(
+          "if(typeof showToast==='function'){showToast('Mode offline — pakai salinan cadangan, data tersimpan lokal & tersinkron otomatis saat online lagi.','warning');}"
+        )
+        .catch(() => {});
+    });
 
     // Buka tautan eksternal (kalau ada) di browser sungguhan, bukan di jendela app ini.
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -118,7 +185,7 @@ if (!gotLock) {
       {
         label: 'Berkas',
         submenu: [
-          { label: 'Muat Ulang', accelerator: 'CmdOrCtrl+R', click: () => mainWindow?.reload() },
+          { label: 'Muat Ulang', accelerator: 'CmdOrCtrl+R', click: () => loadApp() },
           { label: 'Keluar', accelerator: 'CmdOrCtrl+Q', click: () => app.quit() },
         ],
       },

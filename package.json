@@ -1,7 +1,7 @@
 {
   "name": "gloria-biliard-desktop",
   "productName": "Gloria Biliard",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Aplikasi desktop Gloria Biliard -- pembungkus native yang memuat situs live gloria-biliard.pages.dev, supaya perbaikan web-app tetap update instan tanpa perlu rebuild installer.",
   "main": "main.js",
   "author": "Gloria Biliard",
@@ -9,8 +9,9 @@
   "private": true,
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win --publish never",
-    "publish": "electron-builder --win --publish always"
+    "build:offline": "node scripts/build-offline-bundle.js",
+    "dist": "npm run build:offline && electron-builder --win --publish never",
+    "publish": "npm run build:offline && electron-builder --win --publish always"
   },
   "devDependencies": {
     "electron": "^33.0.0",
@@ -28,7 +29,8 @@
     },
     "files": [
       "main.js",
-      "package.json"
+      "package.json",
+      "offline-bundle/**/*"
     ],
     "win": {
       "target": [

@@ -1,3 +1,6 @@
 node_modules/
 dist/
 *.log
+# Dibuat otomatis oleh scripts/build-offline-bundle.js sebelum tiap build
+# (npm run dist/publish) -- bukan source, jangan di-commit (spt dist/).
+offline-bundle/
