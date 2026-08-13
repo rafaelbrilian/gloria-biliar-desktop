@@ -46,7 +46,7 @@
     "publish": {
       "provider": "github",
       "owner": "rafaelbrilian",
-      "repo": "gloria-biliard-desktop"
+      "repo": "gloria-biliar-desktop"
     }
   }
 }
