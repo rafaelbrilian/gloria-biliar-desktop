@@ -1,0 +1,52 @@
+{
+  "name": "gloria-biliard-desktop",
+  "productName": "Gloria Biliard",
+  "version": "1.0.0",
+  "description": "Aplikasi desktop Gloria Biliard -- pembungkus native yang memuat situs live gloria-biliard.pages.dev, supaya perbaikan web-app tetap update instan tanpa perlu rebuild installer.",
+  "main": "main.js",
+  "author": "Gloria Biliard",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win --publish never",
+    "publish": "electron-builder --win --publish always"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "build": {
+    "appId": "com.gloriabiliard.desktop",
+    "productName": "Gloria Biliard",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Gloria Biliard"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "rafaelbrilian",
+      "repo": "gloria-biliard-desktop"
+    }
+  }
+}
