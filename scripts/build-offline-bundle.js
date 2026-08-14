@@ -1,7 +1,7 @@
 // Membuat salinan cadangan offline dari GloriaBilliard.html + vendor Firebase SDK
-// lokal, dipakai main.js sbg fallback HANYA saat live URL gagal dimuat (lihat
-// loadApp() di main.js). Bukan dipakai sehari-hari -- versi live tetap prioritas
-// utama setiap kali ada internet, supaya perbaikan bug tetap instan seperti biasa.
+// lokal, dipakai main.js sbg fallback OTOMATIS HANYA saat live URL gagal dimuat
+// (lihat loadApp() di main.js). Bukan dipakai sehari-hari -- versi live tetap
+// prioritas utama setiap kali ada internet, supaya perbaikan bug tetap instan.
 //
 // Jalankan manual sebelum tiap `npm run dist`/`npm run publish` kalau ingin
 // jaring pengamannya ikut memuat versi terbaru:
@@ -76,8 +76,8 @@ async function main() {
 
     // Arahkan <script src="https://www.gstatic.com/firebasejs/.../file.js" ...>
     // ke salinan lokal ./vendor/file.js -- SATU-SATUNYA hal yg diubah dari HTML
-    // live, sisanya dibiarkan persis sama (lihat laporan audit: dependensi lain
-    // sudah berdegradasi aman tanpa internet, tak perlu di-vendor).
+    // live, sisanya dibiarkan persis sama (dependensi lain sudah berdegradasi
+    // aman tanpa internet, tak perlu di-vendor).
     const cdnPattern = new RegExp(
       `https://www\\.gstatic\\.com/firebasejs/${FIREBASE_VERSION}/${file}`,
       'g'
