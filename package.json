@@ -30,6 +30,7 @@
     "files": [
       "main.js",
       "package.json",
+      "scripts/**/*",
       "offline-bundle/**/*"
     ],
     "win": {

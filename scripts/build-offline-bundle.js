@@ -1,11 +1,12 @@
-// Membuat salinan cadangan offline dari GloriaBilliard.html + vendor Firebase SDK
-// lokal, dipakai main.js sbg fallback OTOMATIS HANYA saat live URL gagal dimuat
-// (lihat loadApp() di main.js). Bukan dipakai sehari-hari -- versi live tetap
-// prioritas utama setiap kali ada internet, supaya perbaikan bug tetap instan.
-//
-// Jalankan manual sebelum tiap `npm run dist`/`npm run publish` kalau ingin
-// jaring pengamannya ikut memuat versi terbaru:
-//   node scripts/build-offline-bundle.js
+// Mengunduh salinan GloriaBilliard.html + vendor Firebase SDK lokal ke sebuah
+// folder tujuan. Dipakai 2 cara:
+// 1. CLI manual sebelum `npm run dist`/`npm run publish` -- menyegarkan
+//    offline-bundle/ (salinan yg DIBUNDEL ke installer, dipakai sbg SEEDING
+//    awal isi cache konten saat aplikasi pertama kali dipasang):
+//      node scripts/build-offline-bundle.js
+// 2. Dipanggil LANGSUNG oleh main.js saat aplikasi jalan (22 Agu 2026, Rencana
+//    B) -- mengunduh ke folder staging sementara, lalu main.js yg memutuskan
+//    kapan menukar isi cache aktif kalau kontennya berbeda dari yg lama.
 'use strict';
 const https = require('https');
 const fs = require('fs');
@@ -20,9 +21,6 @@ const FIREBASE_FILES = [
   'firebase-database-compat.js',
   'firebase-app-check-compat.js',
 ];
-
-const OUT_DIR = path.join(__dirname, '..', 'offline-bundle');
-const VENDOR_DIR = path.join(OUT_DIR, 'vendor');
 
 function fetchText(url) {
   return new Promise((resolve, reject) => {
@@ -61,18 +59,25 @@ function fetchBinary(url) {
   });
 }
 
-async function main() {
-  fs.mkdirSync(VENDOR_DIR, { recursive: true });
+// Unduh HTML live + vendor Firebase, tulis ke outDir. Melempar error kalau
+// gagal (offline dsb) -- pemanggil (CLI atau main.js) yg menentukan cara
+// menanganinya (CLI: keluar dgn kode error; main.js/Rencana B: tangkap diam2
+// & pertahankan cache lama, lihat komentar checkForContentUpdate()).
+async function buildContentBundle(outDir, opts) {
+  opts = opts || {};
+  const log = opts.quiet ? function () {} : console.log;
+  const vendorDir = path.join(outDir, 'vendor');
+  fs.mkdirSync(vendorDir, { recursive: true });
 
-  console.log('Mengunduh halaman live:', LIVE_URL);
+  log('Mengunduh halaman live:', LIVE_URL);
   let html = await fetchText(LIVE_URL);
 
-  console.log('Mengunduh 5 file Firebase SDK v' + FIREBASE_VERSION + '...');
+  log('Mengunduh 5 file Firebase SDK v' + FIREBASE_VERSION + '...');
   for (const file of FIREBASE_FILES) {
     const url = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}/${file}`;
     const buf = await fetchBinary(url);
-    fs.writeFileSync(path.join(VENDOR_DIR, file), buf);
-    console.log('  ' + file + ' (' + buf.length + ' bytes)');
+    fs.writeFileSync(path.join(vendorDir, file), buf);
+    log('  ' + file + ' (' + buf.length + ' bytes)');
 
     // Arahkan <script src="https://www.gstatic.com/firebasejs/.../file.js" ...>
     // ke salinan lokal ./vendor/file.js -- SATU-SATUNYA hal yg diubah dari HTML
@@ -84,17 +89,26 @@ async function main() {
     );
     const before = html;
     html = html.replace(cdnPattern, './vendor/' + file);
-    if (html === before) {
+    if (html === before && !opts.quiet) {
       console.warn('  PERINGATAN: tag <script> utk ' + file + ' tidak ditemukan di HTML live -- cek manual!');
     }
   }
 
-  const outHtmlPath = path.join(OUT_DIR, 'GloriaBilliard.html');
+  const outHtmlPath = path.join(outDir, 'GloriaBilliard.html');
   fs.writeFileSync(outHtmlPath, html, 'utf8');
-  console.log('Selesai. Bundel offline:', outHtmlPath);
+  log('Selesai. Bundel:', outHtmlPath);
+  return outHtmlPath;
 }
 
-main().catch((e) => {
-  console.error('Gagal membuat bundel offline:', e && e.message);
-  process.exit(1);
-});
+module.exports = { buildContentBundle, LIVE_URL };
+
+// Jalan sbg CLI (`node scripts/build-offline-bundle.js`) -- target default
+// offline-bundle/ (salinan yg dibundel ke installer). TIDAK jalan kalau
+// di-require() dari main.js (require.main !== module saat itu).
+if (require.main === module) {
+  const OUT_DIR = path.join(__dirname, '..', 'offline-bundle');
+  buildContentBundle(OUT_DIR).catch((e) => {
+    console.error('Gagal membuat bundel offline:', e && e.message);
+    process.exit(1);
+  });
+}
