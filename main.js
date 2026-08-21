@@ -303,11 +303,15 @@ if (!gotLock) {
   // tercampur UI app, & tak perlu utak-atik frame mana yg "fokus" di jendela
   // utama (jendela cetak ini dibuang lgs setelah selesai, tak pernah tampil).
   function setupSilentPrinting() {
-    ipcMain.handle('print-silent', async (_event, html) => {
+    ipcMain.handle('print-silent', async (_event, html, deviceName) => {
       return new Promise((resolve) => {
         const printWin = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
+        const printOpts = { silent: true, printBackground: true };
+        // deviceName eksplisit (dipilih di Pengaturan > Pengaturan Printer) --
+        // kosong/null = pakai printer default Windows saat ini (perilaku lama).
+        if (deviceName) printOpts.deviceName = deviceName;
         printWin.webContents.once('did-finish-load', () => {
-          printWin.webContents.print({ silent: true, printBackground: true }, (success, reason) => {
+          printWin.webContents.print(printOpts, (success, reason) => {
             printWin.close();
             resolve({ success, reason: reason || null });
           });
@@ -316,8 +320,7 @@ if (!gotLock) {
       });
     });
 
-    // Dipakai kalau nanti perlu UI pilih printer default struk (blm ada di
-    // Pengaturan skrg) -- disiapkan skalian, murah & tak mengganggu apa pun
+    // Dipakai UI Pengaturan > Pengaturan Printer utk pilih printer target
     // kalau belum dipakai.
     ipcMain.handle('list-printers', async () => {
       try { return await mainWindow.webContents.getPrintersAsync(); }

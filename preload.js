@@ -11,6 +11,6 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('gloriaDesktop', {
   isElectron: true,
-  printSilently: (html) => ipcRenderer.invoke('print-silent', html),
+  printSilently: (html, deviceName) => ipcRenderer.invoke('print-silent', html, deviceName),
   listPrinters: () => ipcRenderer.invoke('list-printers'),
 });
