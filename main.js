@@ -28,6 +28,17 @@ const CONTENT_CACHE_DIR = path.join(app.getPath('userData'), 'content-cache'); /
 const CONTENT_STAGING_DIR = path.join(app.getPath('userData'), 'content-cache-staging'); // unduhan sementara sblm ditukar
 const CONTENT_BACKUP_DIR = path.join(app.getPath('userData'), 'content-cache-backup'); // jaring pengaman saat proses tukar
 const CONTENT_MIME = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json' };
+// PORT TETAP (bukan 0/acak) -- WAJIB, ditemukan lewat testing user 22 Agu:
+// localStorage & izin Web Serial (USB lampu) Chromium terikat ke ORIGIN PENUH
+// (skema+host+PORT), bukan cuma hostname. Port acak tiap start = origin baru
+// tiap restart = localStorage & izin USB yg sudah diberikan sebelumnya HILANG
+// diam2 stlh restart -- inilah kenapa USB tadinya "Terhubung (otomatis)" jadi
+// "USB terputus" setelah Rencana B (yg tadinya masih pakai listen(0,...)).
+// Angka 58234 dipilih sembarang (tak lazim dipakai software lain) -- fallback
+// ke port acak HANYA kalau port ini kebetulan sedang dipakai proses lain
+// (lihat startContentServer()), supaya app tetap bisa jalan meski jarang
+// kehilangan persistensi utk sesi itu saja.
+const FIXED_CONTENT_PORT = 58234;
 const CONTENT_UPDATE_INTERVAL_MS = 45 * 60 * 1000; // cek ulang tiap 45 menit selama app tetap terbuka
 
 // Cegah 2 instance app jalan bersamaan di 1 komputer -- 2 jendela terpisah
@@ -73,30 +84,58 @@ if (!gotLock) {
     } catch (e) { /* first-run seeding gagal -- server statis di bawah akan 404, ditangani did-fail-load bawaan Electron */ }
   }
 
+  // Listen() sekali, ditunggu via 'error'/'listening' EKSPLISIT (bukan callback
+  // ke-3 di .listen()) -- ditemukan lewat testing: passing callback SEKALIGUS
+  // register 'error' listener terpisah bisa membuat KEDUANYA terpanggil dlm
+  // urutan tak terduga (callback listen tetap terpanggil "sukses" meski error
+  // EADDRINUSE juga terjadi), bikin resolve() menang duluan dgn nilai SALAH.
+  // Pola eksplisit ini teruji bebas dari race itu.
+  function tryListen(server, port) {
+    return new Promise((resolve, reject) => {
+      function onError(err) { cleanup(); reject(err); }
+      function onListening() { cleanup(); resolve(); }
+      function cleanup() { server.removeListener('error', onError); server.removeListener('listening', onListening); }
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(port, '127.0.0.1');
+    });
+  }
+
   // Server statis lokal (127.0.0.1) yg SELALU dipakai sbg sumber jendela utama
   // (bukan lagi fallback sesekali) -- 127.0.0.1 dipilih (bukan file://) supaya
   // App Check/reCAPTCHA di dalam halaman tetap dilewati dgn benar (kodenya cek
   // location.hostname==='localhost'||'127.0.0.1').
-  function startContentServer() {
-    return new Promise((resolve, reject) => {
-      if (contentServer) { resolve(contentServerPort); return; }
-      contentServer = http.createServer((req, res) => {
-        let urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
-        if (urlPath === '/' || urlPath === '/GloriaBilliard') urlPath = '/GloriaBilliard.html';
-        const filePath = path.join(CONTENT_CACHE_DIR, urlPath);
-        if (!filePath.startsWith(CONTENT_CACHE_DIR)) { res.writeHead(403); res.end(); return; }
-        fs.readFile(filePath, (err, data) => {
-          if (err) { res.writeHead(404); res.end('Not found'); return; }
-          res.writeHead(200, { 'Content-Type': CONTENT_MIME[path.extname(filePath)] || 'application/octet-stream' });
-          res.end(data);
-        });
-      });
-      contentServer.on('error', reject);
-      contentServer.listen(0, '127.0.0.1', () => {
-        contentServerPort = contentServer.address().port;
-        resolve(contentServerPort);
+  async function startContentServer() {
+    if (contentServer) return contentServerPort;
+    contentServer = http.createServer((req, res) => {
+      let urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
+      if (urlPath === '/' || urlPath === '/GloriaBilliard') urlPath = '/GloriaBilliard.html';
+      const filePath = path.join(CONTENT_CACHE_DIR, urlPath);
+      if (!filePath.startsWith(CONTENT_CACHE_DIR)) { res.writeHead(403); res.end(); return; }
+      fs.readFile(filePath, (err, data) => {
+        if (err) { res.writeHead(404); res.end('Not found'); return; }
+        res.writeHead(200, { 'Content-Type': CONTENT_MIME[path.extname(filePath)] || 'application/octet-stream' });
+        res.end(data);
       });
     });
+    // Coba FIXED_CONTENT_PORT dulu (WAJIB utk persistensi localStorage & izin
+    // Web Serial USB antar-restart, lihat komentar deklarasinya) -- kalau
+    // KEBETULAN sedang dipakai proses lain (EADDRINUSE, sangat jarang di
+    // laptop kasir khusus), baru jatuh ke port acak sbg fallback supaya app
+    // tetap bisa jalan (cuma kehilangan persistensi utk sesi start itu saja).
+    try {
+      await tryListen(contentServer, FIXED_CONTENT_PORT);
+      contentServerPort = FIXED_CONTENT_PORT;
+    } catch (err) {
+      if (err && err.code === 'EADDRINUSE') {
+        await tryListen(contentServer, 0);
+        contentServerPort = contentServer.address().port;
+      } else {
+        throw err;
+      }
+    }
+    contentServer.on('error', () => {}); // koneksi individual error setelah listen sukses -- abaikan, bukan fatal
+    return contentServerPort;
   }
 
   function contentServerUrl() {
