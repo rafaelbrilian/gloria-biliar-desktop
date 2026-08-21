@@ -16,7 +16,7 @@
 // absen.html terpisah (tak berubah). TIDAK PERNAH auto-reload jendela yg
 // SEDANG dipakai staf saat update datang (bisa mengganggu transaksi yg lagi
 // jalan) -- update baru TERPAKAI setelah app di-restart/"Muat Ulang" manual.
-const { app, BrowserWindow, Menu, session, dialog, shell } = require('electron');
+const { app, BrowserWindow, Menu, session, dialog, shell, ipcMain } = require('electron');
 const path = require('path');
 const http = require('http');
 const fs = require('fs');
@@ -223,6 +223,7 @@ if (!gotLock) {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: false, // Web Serial via session handler perlu ini nonaktif di sebagian versi Electron
+        preload: path.join(__dirname, 'preload.js'), // 22 Agu 2026: jembatan print-senyap, lihat preload.js
       },
     });
 
@@ -292,6 +293,38 @@ if (!gotLock) {
     });
   }
 
+  // ── Cetak struk SENYAP (22 Agu 2026) ──
+  // window.print()/iframe.print() BIASA (dipakai _printThermal() di
+  // GloriaBilliard.html) selalu munculkan dialog printer Chromium -- itu
+  // perilaku BROWSER normal, tapi mengganggu utk app kasir yg cetak struk tiap
+  // transaksi. HANYA proses utama yg bisa benar2 senyap (webContents.print
+  // dgn {silent:true}) -- jendela CETAK TERSENDIRI (bukan iframe di jendela
+  // utama) dipakai supaya konten yg ter-print PERSIS struknya saja, tak
+  // tercampur UI app, & tak perlu utak-atik frame mana yg "fokus" di jendela
+  // utama (jendela cetak ini dibuang lgs setelah selesai, tak pernah tampil).
+  function setupSilentPrinting() {
+    ipcMain.handle('print-silent', async (_event, html) => {
+      return new Promise((resolve) => {
+        const printWin = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
+        printWin.webContents.once('did-finish-load', () => {
+          printWin.webContents.print({ silent: true, printBackground: true }, (success, reason) => {
+            printWin.close();
+            resolve({ success, reason: reason || null });
+          });
+        });
+        printWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+      });
+    });
+
+    // Dipakai kalau nanti perlu UI pilih printer default struk (blm ada di
+    // Pengaturan skrg) -- disiapkan skalian, murah & tak mengganggu apa pun
+    // kalau belum dipakai.
+    ipcMain.handle('list-printers', async () => {
+      try { return await mainWindow.webContents.getPrintersAsync(); }
+      catch (e) { return []; }
+    });
+  }
+
   // ── Menu minimal -- TETAP sertakan Toggle DevTools & Reload, keduanya
   // terbukti krusial malam ini utk diagnosa langsung lewat Console kalau
   // ada masalah sinkron/lampu di kemudian hari. Jangan dihapus. ──
@@ -335,6 +368,7 @@ if (!gotLock) {
   app.whenReady().then(() => {
     ensureContentCacheSeeded();
     setupSerialPermissions();
+    setupSilentPrinting();
     setupMenu();
     createWindow();
 
