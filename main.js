@@ -75,13 +75,24 @@ if (!gotLock) {
   // dari salinan yg DIBUNDEL ke installer (offline-bundle/), supaya app BISA
   // langsung jalan offline SEJAK DETIK PERTAMA tanpa perlu tunggu unduhan.
   // checkForContentUpdate() di bawah akan menyegarkannya begitu ada internet.
+  // 22 Agu 2026 (review mandiri): komentar lama di sini bilang "server statis
+  // 404 ditangani did-fail-load bawaan Electron" -- itu SISA dari arsitektur
+  // SEBELUM Rencana B (waktu itu did-fail-load memang ada, dipakai utk jatuh
+  // dari live ke offline). Rencana B menghapus handler itu (tak perlu lagi,
+  // krn tak ada lagi "live" utk dicoba duluan) TAPI lupa comment ini ikut
+  // diperbarui -- SEBENARNYA kalau seeding gagal (mis. offline-bundle korup/
+  // hilang dari instalasi) & belum pernah ada internet sama sekali utk
+  // checkForContentUpdate() menyelamatkan, jendela utama akan 404 TANPA
+  // penanganan apa pun. Ditambahkan didFailLoad handler eksplisit di
+  // createWindow() di bawah utk menutup celah ini (kasus sangat jarang,
+  // tapi lebih baik ada pesan jelas drpd layar putih/error bawaan Electron).
   function ensureContentCacheSeeded() {
     if (dirHasContent(CONTENT_CACHE_DIR)) return; // sudah ada (bukan first-run, atau sudah pernah diupdate)
     try {
       if (dirHasContent(SEED_BUNDLE_DIR)) {
         copyDirSync(SEED_BUNDLE_DIR, CONTENT_CACHE_DIR);
       }
-    } catch (e) { /* first-run seeding gagal -- server statis di bawah akan 404, ditangani did-fail-load bawaan Electron */ }
+    } catch (e) { /* first-run seeding gagal -- lihat didFailLoad handler di createWindow() */ }
   }
 
   // Listen() sekali, ditunggu via 'error'/'listening' EKSPLISIT (bukan callback
@@ -229,6 +240,28 @@ if (!gotLock) {
 
     loadApp();
 
+    // 22 Agu 2026 (review mandiri, jaring pengaman kasus sangat jarang): kalau
+    // server statis lokal gagal menyajikan GloriaBilliard.html (mis. cache
+    // kosong krn seeding pertama gagal, DAN belum pernah online sekalipun utk
+    // checkForContentUpdate() menyelamatkan) -- tanpa handler ini, staf cuma
+    // lihat layar putih/error bawaan Electron tanpa penjelasan apa pun.
+    // errorCode -3 (ERR_ABORTED) DILEWATI -- itu efek samping navigasi normal
+    // yg digantikan navigasi lain (mis. klik Muat Ulang di tengah loading
+    // sebelumnya), bukan kegagalan sungguhan.
+    mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame || errorCode === -3) return;
+      dialog.showMessageBox(mainWindow, {
+        type: 'error',
+        title: 'Gagal memuat aplikasi',
+        message: 'Gloria Biliard gagal memuat halamannya sendiri (' + errorDescription + ').',
+        detail: 'Ini seharusnya sangat jarang terjadi. Coba: (1) tutup & buka lagi aplikasi ini, (2) pastikan laptop terhubung internet lalu buka lagi (supaya app bisa mengunduh ulang kontennya), (3) kalau tetap gagal, hubungi yang memasang aplikasi ini.',
+        buttons: ['Coba Lagi', 'Tutup'],
+        defaultId: 0,
+      }).then(({ response }) => {
+        if (response === 0) loadApp();
+      });
+    });
+
     // Buka tautan eksternal (kalau ada) di browser sungguhan, bukan di jendela app ini.
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
       if (!url.startsWith('http://127.0.0.1:')) {
@@ -310,10 +343,30 @@ if (!gotLock) {
         // deviceName eksplisit (dipilih di Pengaturan > Pengaturan Printer) --
         // kosong/null = pakai printer default Windows saat ini (perilaku lama).
         if (deviceName) printOpts.deviceName = deviceName;
+        // 22 Agu 2026 (review mandiri, blm ada laporan nyata): SEBELUMNYA tak
+        // py jaring pengaman kalau 'did-finish-load' tak pernah terpanggil
+        // (data: URL nyaris tak pernah gagal, tapi kalau terjadi -- HTML
+        // rusak/terlalu besar -- jendela print tersembunyi ini NYANGKUT
+        // SELAMANYA & panggilan cetak dari halaman tak pernah selesai/gagal
+        // sama sekali, cuma diam menggantung). settled+timer memastikan
+        // Promise SELALU resolve & jendela SELALU ditutup, apa pun yg terjadi.
+        let settled = false;
+        const finish = (result) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(safetyTimer);
+          try { if (!printWin.isDestroyed()) printWin.close(); } catch (e) {}
+          resolve(result);
+        };
+        const safetyTimer = setTimeout(() => {
+          finish({ success: false, reason: 'timeout: halaman cetak tidak selesai dimuat' });
+        }, 15000);
+        printWin.webContents.once('did-fail-load', (_e, errorCode, errorDescription) => {
+          finish({ success: false, reason: 'gagal memuat halaman cetak: ' + errorDescription });
+        });
         printWin.webContents.once('did-finish-load', () => {
           printWin.webContents.print(printOpts, (success, reason) => {
-            printWin.close();
-            resolve({ success, reason: reason || null });
+            finish({ success, reason: reason || null });
           });
         });
         printWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
