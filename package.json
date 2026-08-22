@@ -1,8 +1,8 @@
 {
   "name": "gloria-biliard-desktop",
   "productName": "Gloria Biliard",
-  "version": "1.3.0",
-  "description": "Aplikasi desktop Gloria Biliard -- pembungkus native yang memuat situs live gloria-biliard.pages.dev, supaya perbaikan web-app tetap update instan tanpa perlu rebuild installer.",
+  "version": "2.0.0",
+  "description": "Aplikasi desktop Gloria Biliard -- SELALU jalan dari salinan konten lokal (100% offline utk operasional), mengunduh pembaruan konten di latar belakang secara diam-diam (terpakai setelah restart/Muat Ulang, tak pernah mengganggu transaksi yg sedang berjalan).",
   "main": "main.js",
   "author": "Gloria Biliard",
   "license": "UNLICENSED",
