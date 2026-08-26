@@ -13,6 +13,22 @@ const fs = require('fs');
 const path = require('path');
 
 const LIVE_URL = 'https://gloria-biliard.pages.dev/GloriaBilliard';
+// 27 Agu 2026 (review mandiri, rapikan): fetchText/fetchBinary di bawah
+// SEBELUMNYA tak py timeout sama sekali -- https.get() cuma reject via
+// .on('error',...) utk kegagalan KONEKSI (DNS gagal, connection refused,
+// dst), TAPI koneksi yg sempat tersambung lalu NYANGKUT diam2 (mis. firewall
+// venue diam2 membuang paket setelah handshake, bukan menolaknya) tak pernah
+// memicu error/reject apa pun -- Promise ini bisa MENGGANTUNG SELAMANYA.
+// checkForContentUpdate() di main.js memakai flag contentUpdateInFlight utk
+// cegah pemanggilan tumpang-tindih -- kalau fetch ini nyangkut permanen,
+// flag itu TAK PERNAH direset, memblokir SEMUA pengecekan update berikutnya
+// (otomatis maupun manual) sampai app di-restart. Pola bug identik sudah
+// berkali-kali ditemukan & diperbaiki di GloriaBilliard.html sendiri (semua
+// pembacaan Firestore langsung dibungkus Promise.race+timeout) -- diterapkan
+// pola sama di sini, pakai req.setTimeout+destroy bawaan Node (lebih bersih
+// drpd Promise.race krn benar2 MEMBATALKAN koneksi yg nyangkut, bukan cuma
+// mengabaikan Promise-nya sementara koneksi lama tetap jalan diam2).
+const FETCH_TIMEOUT_MS = 20000;
 const FIREBASE_VERSION = '10.12.0';
 const FIREBASE_FILES = [
   'firebase-app-compat.js',
@@ -24,7 +40,7 @@ const FIREBASE_FILES = [
 
 function fetchText(url) {
   return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
+    const req = https.get(url, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         fetchText(res.headers.location).then(resolve, reject);
         return;
@@ -37,13 +53,17 @@ function fetchText(url) {
       res.setEncoding('utf8');
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => resolve(data));
-    }).on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(FETCH_TIMEOUT_MS, () => {
+      req.destroy(new Error(`GET ${url} -> timeout setelah ${FETCH_TIMEOUT_MS}ms (koneksi nyangkut)`));
+    });
   });
 }
 
 function fetchBinary(url) {
   return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
+    const req = https.get(url, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         fetchBinary(res.headers.location).then(resolve, reject);
         return;
@@ -55,7 +75,11 @@ function fetchBinary(url) {
       const chunks = [];
       res.on('data', (chunk) => chunks.push(chunk));
       res.on('end', () => resolve(Buffer.concat(chunks)));
-    }).on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(FETCH_TIMEOUT_MS, () => {
+      req.destroy(new Error(`GET ${url} -> timeout setelah ${FETCH_TIMEOUT_MS}ms (koneksi nyangkut)`));
+    });
   });
 }
 

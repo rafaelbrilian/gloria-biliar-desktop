@@ -177,8 +177,17 @@ if (!gotLock) {
   // gara2 gagal cek update. TIDAK PERNAH auto-reload jendela yg sedang
   // dipakai staf -- update baru TERPAKAI setelah restart/"Muat Ulang" manual
   // berikutnya (lihat komentar panjang di atas file ini).
+  // 27 Agu 2026 (review mandiri, rapikan): SEBELUMNYA balas boolean polos
+  // (true=ditukar, false=SAMA-SAMA dipakai utk "sudah terbaru" MAUPUN "gagal
+  // cek/offline" -- tak bisa dibedakan). Cukup utk 3 pemanggil OTOMATIS (aman
+  // tetap diam2 apa pun hasilnya), tapi menu "Cek Update Konten Sekarang" yg
+  // DIPICU MANUAL staf sebelumnya TIDAK PERNAH memberi tahu apa pun -- klik,
+  // tak ada respons terlihat, staf tak tahu apakah berhasil/gagal/memang sudah
+  // terbaru. Sekarang balas {updated, error} -- pemanggil otomatis tetap
+  // abaikan field ini (perilaku tak berubah), menu manual di bawah pakai utk
+  // kasih tahu hasilnya eksplisit.
   async function checkForContentUpdate() {
-    if (contentUpdateInFlight) return false;
+    if (contentUpdateInFlight) return { updated: false, error: null };
     contentUpdateInFlight = true;
     try {
       if (fs.existsSync(CONTENT_STAGING_DIR)) fs.rmSync(CONTENT_STAGING_DIR, { recursive: true, force: true });
@@ -191,7 +200,7 @@ if (!gotLock) {
 
       if (stagingHtml === activeHtml) {
         fs.rmSync(CONTENT_STAGING_DIR, { recursive: true, force: true }); // identik -- tak perlu ditukar
-        return false;
+        return { updated: false, error: null };
       }
 
       swapCacheWithStaging();
@@ -204,11 +213,13 @@ if (!gotLock) {
           )
           .catch(() => {});
       }
-      return true;
+      return { updated: true, error: null };
     } catch (e) {
-      // Offline / situs live down / dll -- diam2, cache aktif tetap dipakai.
+      // Offline / situs live down / dll -- diam2utk pemanggil otomatis, cache
+      // aktif tetap dipakai. Pesan errornya tetap dikembalikan (dipakai menu
+      // manual di bawah), bukan dibuang.
       try { if (fs.existsSync(CONTENT_STAGING_DIR)) fs.rmSync(CONTENT_STAGING_DIR, { recursive: true, force: true }); } catch (_e) {}
-      return false;
+      return { updated: false, error: (e && e.message) || String(e) };
     } finally {
       contentUpdateInFlight = false;
     }
@@ -412,8 +423,46 @@ if (!gotLock) {
       {
         label: 'Bantuan',
         submenu: [
-          { label: 'Cek Update Konten Sekarang', click: async () => { await checkForContentUpdate(); } },
-          { label: 'Cek Update Aplikasi', click: () => autoUpdater.checkForUpdatesAndNotify() },
+          {
+            label: 'Cek Update Konten Sekarang',
+            click: async () => {
+              const result = await checkForContentUpdate();
+              if (result.error) {
+                dialog.showMessageBox(mainWindow, {
+                  type: 'warning',
+                  title: 'Cek Update Konten',
+                  message: 'Gagal memeriksa pembaruan konten.',
+                  detail: 'Pastikan laptop terhubung internet lalu coba lagi.\n\nDetail teknis: ' + result.error,
+                });
+              } else if (result.updated) {
+                dialog.showMessageBox(mainWindow, {
+                  type: 'info',
+                  title: 'Cek Update Konten',
+                  message: 'Pembaruan konten ditemukan & sudah diunduh.',
+                  detail: 'Klik "Muat Ulang" (Ctrl+R) atau restart aplikasi ini untuk memakainya.',
+                });
+              } else {
+                dialog.showMessageBox(mainWindow, {
+                  type: 'info',
+                  title: 'Cek Update Konten',
+                  message: 'Konten aplikasi sudah versi terbaru.',
+                });
+              }
+            },
+          },
+          {
+            label: 'Cek Update Aplikasi',
+            click: () => {
+              autoUpdater.checkForUpdatesAndNotify().catch((e) => {
+                dialog.showMessageBox(mainWindow, {
+                  type: 'warning',
+                  title: 'Cek Update Aplikasi',
+                  message: 'Gagal memeriksa pembaruan aplikasi.',
+                  detail: 'Pastikan laptop terhubung internet lalu coba lagi.\n\nDetail teknis: ' + ((e && e.message) || String(e)),
+                });
+              });
+            },
+          },
           { label: 'Versi: ' + app.getVersion(), enabled: false },
         ],
       },
