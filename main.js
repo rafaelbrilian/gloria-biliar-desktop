@@ -122,7 +122,21 @@ if (!gotLock) {
       let urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
       if (urlPath === '/' || urlPath === '/GloriaBilliard') urlPath = '/GloriaBilliard.html';
       const filePath = path.join(CONTENT_CACHE_DIR, urlPath);
-      if (!filePath.startsWith(CONTENT_CACHE_DIR)) { res.writeHead(403); res.end(); return; }
+      // 28 Agu 2026 (audit menyeluruh): SEBELUMNYA cek containment cuma
+      // string-prefix polos (filePath.startsWith(CONTENT_CACHE_DIR)) --
+      // CONTENT_STAGING_DIR/CONTENT_BACKUP_DIR (folder SAUDARA, nama
+      // "content-cache-staging"/"content-cache-backup") kebetulan berbagi
+      // PREFIX STRING PERSIS SAMA dgn "content-cache" (tanpa pemisah jalur
+      // di antaranya) -- path traversal (mis. "/../content-cache-staging/
+      // GloriaBilliard.html") lolos cek startsWith INI padahal SECARA
+      // NYATA sudah keluar dari folder yg dimaksud. Dampak nyata rendah
+      // (server cuma dengar 127.0.0.1, & isi folder saudara itu bukan
+      // rahasia -- sama2 salinan GloriaBilliard.html publik), TAPI tetap
+      // celah nyata yg wajib ditutup benar -- pola path.relative() di bawah
+      // JAUH lebih aman drpd string-prefix apa pun (menangani kasus batas
+      // pemisah jalur & path traversal dgan benar).
+      const relPath = path.relative(CONTENT_CACHE_DIR, filePath);
+      if (relPath.startsWith('..') || path.isAbsolute(relPath)) { res.writeHead(403); res.end(); return; }
       fs.readFile(filePath, (err, data) => {
         if (err) { res.writeHead(404); res.end('Not found'); return; }
         res.writeHead(200, { 'Content-Type': CONTENT_MIME[path.extname(filePath)] || 'application/octet-stream' });
