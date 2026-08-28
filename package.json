@@ -50,7 +50,8 @@
     "publish": {
       "provider": "github",
       "owner": "rafaelbrilian",
-      "repo": "gloria-biliar-desktop"
+      "repo": "gloria-biliar-desktop",
+      "releaseType": "release"
     }
   }
 }
