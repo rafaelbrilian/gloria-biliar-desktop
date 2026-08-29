@@ -337,6 +337,21 @@ if (!gotLock) {
 
     // Buka tautan eksternal (kalau ada) di browser sungguhan, bukan di jendela app ini.
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+      // FIXED 30 Agu 2026 (audit putaran ke-14, KRITIS): window.open('','_blank')
+      // -- dipakai GloriaBilliard.html utk 3 fitur cetak/PDF on-the-fly
+      // (printLaporanHarian/printAbsensi/exportAbsensiPDF, document.write ke
+      // popup) -- me-resolve ke navigasi 'about:blank', BUKAN url eksternal.
+      // SEBELUMNYA url ini ikut kena cek di bawah (tak diawali http://127.0.0.1:)
+      // -> dianggap "eksternal" -> shell.openExternal('about:blank') (buka
+      // browser OS ke tab kosong, efek samping tak diminta) + deny (window
+      // baru TAK PERNAH benar2 dibuat, window.open() balik null di renderer)
+      // -> w.document.write(html) crash TypeError tak tertangkap -> 3 fitur
+      // cetak/PDF di atas GAGAL TOTAL & SENYAP (tanpa toast) di app Desktop
+      // ini, padahal normal di browser biasa. Izinkan about:blank secara
+      // eksplisit sebelum cek eksternal.
+      if (url === 'about:blank' || url === '') {
+        return { action: 'allow' };
+      }
       if (!url.startsWith('http://127.0.0.1:')) {
         shell.openExternal(url);
         return { action: 'deny' };
@@ -354,6 +369,22 @@ if (!gotLock) {
   // requestPort() akan menggantung tanpa pernah resolve/reject.
   function setupSerialPermissions() {
     const ses = session.defaultSession;
+    // FIXED 30 Agu 2026 (audit putaran ke-14, KRITIS): setDevicePermissionHandler
+    // di bawah SEBELUMNYA meng-otorisasi SEMUA device bertipe 'serial' tanpa
+    // syarat -- komentarnya bilang niatnya "izinkan device yg SUDAH dipilih
+    // via select-serial-port", tapi kodenya tak pernah benar2 mencocokkan
+    // itu. Akibatnya navigator.serial.getPorts() (dipakai
+    // _tryAutoReconnectUsbLampu() auto-reconnect diam2 di GloriaBilliard.html)
+    // mengembalikan SEMUA port serial yg terpasang di laptop, bukan cuma yg
+    // pernah dipilih via dialog app ini -- kalau ada device serial LAIN
+    // tercolok (printer serial, RFID reader/absensi yg direncanakan, dongle
+    // apa pun), auto-reconnect (yg blind ambil ports[0]) bisa nyambung ke
+    // device yg SALAH tanpa terdeteksi (write() ke device salah biasanya
+    // tak throw, jadi tak ada toast error -- kasir percaya lampu USB
+    // tersambung normal padahal tidak). Fix: catat portId yg BENAR2
+    // disetujui lewat select-serial-port di bawah, setDevicePermissionHandler
+    // cuma approve portId yg ADA di daftar itu.
+    const approvedSerialPortIds = new Set();
 
     ses.on('select-serial-port', (event, portList, webContents, callback) => {
       event.preventDefault();
@@ -362,6 +393,7 @@ if (!gotLock) {
         return;
       }
       if (portList.length === 1) {
+        approvedSerialPortIds.add(portList[0].portId);
         callback(portList[0].portId);
         return;
       }
@@ -377,6 +409,7 @@ if (!gotLock) {
         cancelId: portList.length,
       }).then(({ response }) => {
         if (response < portList.length) {
+          approvedSerialPortIds.add(portList[response].portId);
           callback(portList[response].portId);
         } else {
           callback('');
@@ -390,12 +423,32 @@ if (!gotLock) {
       return true; // izin lain (notifications, dst) -- default izinkan, app ini domain sendiri terpercaya
     });
 
-    // Izinkan device serial yg SUDAH dipilih via select-serial-port di atas
-    // supaya navigator.serial.getPorts() (auto-reconnect diam-diam, dipakai
-    // _tryAutoReconnectUsbLampu) mengenalinya sbg sudah diizinkan.
+    // Izinkan HANYA device serial yg portId-nya benar2 pernah disetujui lewat
+    // select-serial-port di atas (lihat komentar panjang di deklarasi
+    // approvedSerialPortIds -- SEBELUMNYA blanket-true utk SEMUA device 'serial').
     ses.setDevicePermissionHandler((details) => {
-      if (details.deviceType === 'serial') return true;
-      return false;
+      if (details.deviceType !== 'serial') return false;
+      return approvedSerialPortIds.has(details.device && details.device.portId);
+    });
+  }
+
+  // ── Unduhan (Export CSV/Excel) SENYAP (30 Agu 2026, audit putaran ke-14) ──
+  // Browser biasa (Chrome/Edge setelan default) langsung simpan file blob
+  // unduhan (tombol Export CSV/Excel di tab Laporan/Turnamen/Histori Shift)
+  // ke folder Downloads TANPA dialog apa pun. Electron TANPA
+  // session.on('will-download') terdaftar menampilkan dialog "Save As"
+  // bawaan Windows utk SETIAP unduhan (perilaku default Electron kalau
+  // savePath tak diset lewat API) -- dialog sistem yg tak pernah ada di
+  // versi web. Karena kode Export (GloriaBilliard.html) menembak toast
+  // "✅ ... berhasil!" SEGERA sesudah memicu unduhan (tanpa menunggu dialog
+  // itu selesai), staf yg meng-Cancel dialog (kaget krn dialog sistem
+  // tiba2 muncul, sesuatu yg tak pernah terjadi sebelumnya) tetap melihat
+  // pesan "berhasil" walau file SAMA SEKALI tak tersimpan. Fix: simpan
+  // otomatis ke folder Downloads, meniru persis perilaku default browser --
+  // tanpa dialog sama sekali.
+  function setupSilentDownloads() {
+    session.defaultSession.on('will-download', (_event, item) => {
+      item.setSavePath(path.join(app.getPath('downloads'), item.getFilename()));
     });
   }
 
@@ -535,6 +588,7 @@ if (!gotLock) {
   app.whenReady().then(() => {
     ensureContentCacheSeeded();
     setupSerialPermissions();
+    setupSilentDownloads();
     setupSilentPrinting();
     setupMenu();
     createWindow();
