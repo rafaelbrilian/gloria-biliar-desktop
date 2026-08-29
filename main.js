@@ -116,6 +116,40 @@ if (!gotLock) {
   // (bukan lagi fallback sesekali) -- 127.0.0.1 dipilih (bukan file://) supaya
   // App Check/reCAPTCHA di dalam halaman tetap dilewati dgn benar (kodenya cek
   // location.hostname==='localhost'||'127.0.0.1').
+  // FIXED 30 Agu 2026 (audit putaran ke-14): swapCacheWithStaging() (di
+  // bawah) melakukan 2 fs.renameSync BERURUTAN -- di ANTARA keduanya,
+  // CONTENT_CACHE_DIR sama sekali TIDAK ADA di disk. Window-nya sangat
+  // sempit (nyaris instan di NTFS), tapi berulang tiap
+  // CONTENT_UPDATE_INTERVAL_MS selama jam operasional (dan tiap kali staf
+  // klik "Muat Ulang"/"Cek Update Konten Sekarang" bertepatan dgn swap
+  // otomatis). Request yg jatuh PERSIS di celah itu dulu langsung dapat 404
+  // polos -- kalau yg 404 itu salah satu <script src="./vendor/firebase-*.js">
+  // (bukan dokumen HTML utama, yg dikirim sbg request TERPISAH), Firebase
+  // SDK gagal termuat SEBAGIAN secara SENYAP: tak ada dialog error apa pun
+  // (did-fail-load Electron cuma tangkap kegagalan level-JARINGAN, HTTP 404
+  // dianggap navigasi "berhasil") -- sinkron sesi meja/kasir/laporan
+  // berhenti bekerja sampai staf kebetulan reload lagi. Fix: retry singkat
+  // pada ENOENT (bukan restrukturisasi swap-nya sendiri) -- window-nya
+  // nyaris instan, jadi percobaan ulang beberapa puluh ms kemudian nyaris
+  // pasti sudah lewat dari celahnya.
+  function serveContentFile(filePath, res, attemptsLeft) {
+    fs.readFile(filePath, (err, data) => {
+      if (err) {
+        if (err.code === 'ENOENT' && attemptsLeft > 0) {
+          setTimeout(() => serveContentFile(filePath, res, attemptsLeft - 1), 40);
+          return;
+        }
+        res.writeHead(404); res.end('Not found'); return;
+      }
+      res.writeHead(200, {
+        'Content-Type': CONTENT_MIME[path.extname(filePath)] || 'application/octet-stream',
+        'X-Frame-Options': 'DENY',
+        'Content-Security-Policy': "frame-ancestors 'none'",
+      });
+      res.end(data);
+    });
+  }
+
   async function startContentServer() {
     if (contentServer) return contentServerPort;
     contentServer = http.createServer((req, res) => {
@@ -137,24 +171,17 @@ if (!gotLock) {
       // pemisah jalur & path traversal dgan benar).
       const relPath = path.relative(CONTENT_CACHE_DIR, filePath);
       if (relPath.startsWith('..') || path.isAbsolute(relPath)) { res.writeHead(403); res.end(); return; }
-      fs.readFile(filePath, (err, data) => {
-        if (err) { res.writeHead(404); res.end('Not found'); return; }
-        // FIXED 29 Agu 2026 (audit putaran ke-13): server ini cuma dengar
-        // 127.0.0.1 tapi TANPA autentikasi/pengecekan asal permintaan apa
-        // pun -- tanpa header ini, browser BIASA (bukan app Electron ini)
-        // yg kebetulan dipakai di laptop kasir yg sama bisa memuat
-        // http://127.0.0.1:PORT/GloriaBilliard.html di dalam <iframe>
-        // tersembunyi milik halaman pihak ketiga mana pun (celah UI-redress/
-        // clickjacking klasik) -- instance di dalam iframe itu tetap
-        // terhubung ke Firestore PRODUKSI yg sama (config sama persis, bukan
-        // salinan statis beku).
-        res.writeHead(200, {
-          'Content-Type': CONTENT_MIME[path.extname(filePath)] || 'application/octet-stream',
-          'X-Frame-Options': 'DENY',
-          'Content-Security-Policy': "frame-ancestors 'none'",
-        });
-        res.end(data);
-      });
+      // FIXED 29 Agu 2026 (audit putaran ke-13): server ini cuma dengar
+      // 127.0.0.1 tapi TANPA autentikasi/pengecekan asal permintaan apa
+      // pun -- tanpa header X-Frame-Options/CSP (dipasang di
+      // serveContentFile() di atas), browser BIASA (bukan app Electron ini)
+      // yg kebetulan dipakai di laptop kasir yg sama bisa memuat
+      // http://127.0.0.1:PORT/GloriaBilliard.html di dalam <iframe>
+      // tersembunyi milik halaman pihak ketiga mana pun (celah UI-redress/
+      // clickjacking klasik) -- instance di dalam iframe itu tetap
+      // terhubung ke Firestore PRODUKSI yg sama (config sama persis, bukan
+      // salinan statis beku).
+      serveContentFile(filePath, res, 3); // 3 percobaan (put-14) -- lihat komentar serveContentFile()
     });
     // Coba FIXED_CONTENT_PORT dulu (WAJIB utk persistensi localStorage & izin
     // Web Serial USB antar-restart, lihat komentar deklarasinya) -- kalau
