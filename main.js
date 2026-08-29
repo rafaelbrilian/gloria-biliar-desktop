@@ -139,7 +139,20 @@ if (!gotLock) {
       if (relPath.startsWith('..') || path.isAbsolute(relPath)) { res.writeHead(403); res.end(); return; }
       fs.readFile(filePath, (err, data) => {
         if (err) { res.writeHead(404); res.end('Not found'); return; }
-        res.writeHead(200, { 'Content-Type': CONTENT_MIME[path.extname(filePath)] || 'application/octet-stream' });
+        // FIXED 29 Agu 2026 (audit putaran ke-13): server ini cuma dengar
+        // 127.0.0.1 tapi TANPA autentikasi/pengecekan asal permintaan apa
+        // pun -- tanpa header ini, browser BIASA (bukan app Electron ini)
+        // yg kebetulan dipakai di laptop kasir yg sama bisa memuat
+        // http://127.0.0.1:PORT/GloriaBilliard.html di dalam <iframe>
+        // tersembunyi milik halaman pihak ketiga mana pun (celah UI-redress/
+        // clickjacking klasik) -- instance di dalam iframe itu tetap
+        // terhubung ke Firestore PRODUKSI yg sama (config sama persis, bukan
+        // salinan statis beku).
+        res.writeHead(200, {
+          'Content-Type': CONTENT_MIME[path.extname(filePath)] || 'application/octet-stream',
+          'X-Frame-Options': 'DENY',
+          'Content-Security-Policy': "frame-ancestors 'none'",
+        });
         res.end(data);
       });
     });
@@ -148,16 +161,26 @@ if (!gotLock) {
     // KEBETULAN sedang dipakai proses lain (EADDRINUSE, sangat jarang di
     // laptop kasir khusus), baru jatuh ke port acak sbg fallback supaya app
     // tetap bisa jalan (cuma kehilangan persistensi utk sesi start itu saja).
+    // FIXED 29 Agu 2026 (audit putaran ke-13): dulu HANYA err.code==='EADDRINUSE'
+    // yg di-fallback ke port acak -- 58234 kebetulan JATUH DI DALAM rentang
+    // dynamic/ephemeral port bawaan Windows (49152-65535, dipakai OS utk
+    // source port koneksi keluar APA PUN), jadi peluang bentrok lebih tinggi
+    // dari asumsi komentar lama. Laptop dgn Hyper-V/WSL2/Docker Desktop aktif
+    // (makin umum, kadang aktif tanpa user sadar) rutin punya "excluded port
+    // range" dinamis -- kalau 58234 masuk situ, bind() gagal dgn EACCES,
+    // BUKAN EADDRINUSE, & sebelumnya di-throw mentah (bikin loadApp() reject
+    // tanpa pernah loadURL() dipanggil sama sekali -- jendela putih kosong
+    // SELAMANYA, lihat catch(.) di createWindow()/menu Muat Ulang di bawah).
+    // Fallback ke port acak sekarang berlaku utk error listen APA PUN dari
+    // port tetap (bukan cuma EADDRINUSE) -- app selalu berhasil jalan, walau
+    // (spt sudah didokumentasikan) kehilangan persistensi localStorage/izin
+    // USB Serial utk sesi start itu saja kalau sampai fallback ini kepakai.
     try {
       await tryListen(contentServer, FIXED_CONTENT_PORT);
       contentServerPort = FIXED_CONTENT_PORT;
     } catch (err) {
-      if (err && err.code === 'EADDRINUSE') {
-        await tryListen(contentServer, 0);
-        contentServerPort = contentServer.address().port;
-      } else {
-        throw err;
-      }
+      await tryListen(contentServer, 0);
+      contentServerPort = contentServer.address().port;
     }
     contentServer.on('error', () => {}); // koneksi individual error setelah listen sukses -- abaikan, bukan fatal
     return contentServerPort;
@@ -245,6 +268,31 @@ if (!gotLock) {
     await startContentServer();
     mainWindow.loadURL(contentServerUrl());
   }
+  // FIXED 29 Agu 2026 (audit putaran ke-13): loadApp() dulu dipanggil di 3
+  // tempat (createWindow saat startup, tombol "Coba Lagi", menu Muat Ulang)
+  // TANPA .catch() sama sekali -- did-fail-load HANYA menangkap kegagalan
+  // navigasi SETELAH loadURL() berhasil dipanggil; kalau loadApp() sendiri
+  // reject SEBELUM sempat memanggil loadURL() (mis. startContentServer()
+  // melempar error yg tak diantisipasi), rejection itu jadi unhandled
+  // promise rejection senyap -- jendela app tetap terbuka tapi KOSONG PUTIH
+  // SELAMANYA, tanpa dialog error apa pun (persis skenario yg justru ingin
+  // dicegah did-fail-load). Wrapper ini jadi jaring pengaman terakhir --
+  // fix di startContentServer() di atas SUDAH menutup penyebab paling nyata
+  // (EACCES), ini cuma lapisan tambahan kalau ada penyebab lain di masa depan.
+  function loadAppSafe() {
+    loadApp().catch((err) => {
+      dialog.showMessageBox(mainWindow, {
+        type: 'error',
+        title: 'Gagal memuat aplikasi',
+        message: 'Gloria Biliard gagal memuat halamannya sendiri (' + ((err && err.message) || String(err)) + ').',
+        detail: 'Ini seharusnya sangat jarang terjadi. Coba: (1) tutup & buka lagi aplikasi ini, (2) pastikan laptop terhubung internet lalu buka lagi (supaya app bisa mengunduh ulang kontennya), (3) kalau tetap gagal, hubungi yang memasang aplikasi ini.',
+        buttons: ['Coba Lagi', 'Tutup'],
+        defaultId: 0,
+      }).then(({ response }) => {
+        if (response === 0) loadAppSafe();
+      });
+    });
+  }
 
   function createWindow() {
     mainWindow = new BrowserWindow({
@@ -263,7 +311,7 @@ if (!gotLock) {
       },
     });
 
-    loadApp();
+    loadAppSafe();
 
     // 22 Agu 2026 (review mandiri, jaring pengaman kasus sangat jarang): kalau
     // server statis lokal gagal menyajikan GloriaBilliard.html (mis. cache
@@ -283,7 +331,7 @@ if (!gotLock) {
         buttons: ['Coba Lagi', 'Tutup'],
         defaultId: 0,
       }).then(({ response }) => {
-        if (response === 0) loadApp();
+        if (response === 0) loadAppSafe();
       });
     });
 
@@ -417,7 +465,7 @@ if (!gotLock) {
           {
             label: 'Muat Ulang',
             accelerator: 'CmdOrCtrl+R',
-            click: async () => { await checkForContentUpdate(); loadApp(); },
+            click: async () => { await checkForContentUpdate(); loadAppSafe(); },
           },
           { label: 'Keluar', accelerator: 'CmdOrCtrl+Q', click: () => app.quit() },
         ],

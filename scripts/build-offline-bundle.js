@@ -38,11 +38,20 @@ const FIREBASE_FILES = [
   'firebase-app-check-compat.js',
 ];
 
-function fetchText(url) {
+// FIXED 29 Agu 2026 (audit putaran ke-13): dulu rekursi redirect (di bawah)
+// tak dibatasi jumlah hop -- FETCH_TIMEOUT_MS cuma membatasi waktu PER hop,
+// bukan waktu TOTAL akumulasi. Server/proxy yg saling memantul (redirect
+// loop) bikin fungsi ini menggantung JAUH melampaui 20 detik (berpotensi tak
+// pernah selesai), sehingga celah "menggantung selamanya -> contentUpdateInFlight
+// terkunci selamanya" yg katanya sudah ditutup oleh FETCH_TIMEOUT_MS,
+// sebenarnya masih terbuka lewat jalur redirect ini. Batasi maks 5 hop.
+const MAX_REDIRECTS = 5;
+function fetchText(url, redirectsLeft = MAX_REDIRECTS) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        fetchText(res.headers.location).then(resolve, reject);
+        if (redirectsLeft <= 0) { reject(new Error(`GET ${url} -> terlalu banyak redirect (kemungkinan loop)`)); return; }
+        fetchText(res.headers.location, redirectsLeft - 1).then(resolve, reject);
         return;
       }
       if (res.statusCode !== 200) {
@@ -61,11 +70,12 @@ function fetchText(url) {
   });
 }
 
-function fetchBinary(url) {
+function fetchBinary(url, redirectsLeft = MAX_REDIRECTS) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        fetchBinary(res.headers.location).then(resolve, reject);
+        if (redirectsLeft <= 0) { reject(new Error(`GET ${url} -> terlalu banyak redirect (kemungkinan loop)`)); return; }
+        fetchBinary(res.headers.location, redirectsLeft - 1).then(resolve, reject);
         return;
       }
       if (res.statusCode !== 200) {
