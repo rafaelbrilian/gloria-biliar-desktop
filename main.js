@@ -28,6 +28,23 @@ const CONTENT_CACHE_DIR = path.join(app.getPath('userData'), 'content-cache'); /
 const CONTENT_STAGING_DIR = path.join(app.getPath('userData'), 'content-cache-staging'); // unduhan sementara sblm ditukar
 const CONTENT_BACKUP_DIR = path.join(app.getPath('userData'), 'content-cache-backup'); // jaring pengaman saat proses tukar
 const CONTENT_MIME = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json' };
+
+// FIXED 4 Sep 2026 (audit put-18): jaring pengaman TERAKHIR -- SEBELUMNYA
+// TIDAK ADA process.on('uncaughtException'/'unhandledRejection') sama
+// sekali di app ini. Perilaku default Node/Electron utk exception yg tak
+// tertangkap di MANA PUN adalah cetak stack lalu proses LANGSUNG KELUAR --
+// artinya 1 bug kecil yg tak terduga (mis. fs.readFile() yg throw SINKRON
+// utk path aneh, lihat fix serveContentFile() di bawah) mematikan SELURUH
+// app desktop seketika, di tengah transaksi kasir yg sedang berjalan,
+// tanpa dialog error apa pun. Log saja & JANGAN keluar dari proses --
+// exception yg genuinely fatal akan tetap kelihatan gejalanya (fitur yg
+// gagal), tapi app itu sendiri tetap hidup & bisa dipakai lagi.
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException] app tetap berjalan, tapi ada error tak terduga:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection] app tetap berjalan, tapi ada promise gagal tak tertangani:', reason);
+});
 // PORT TETAP (bukan 0/acak) -- WAJIB, ditemukan lewat testing user 22 Agu:
 // localStorage & izin Web Serial (USB lampu) Chromium terikat ke ORIGIN PENUH
 // (skema+host+PORT), bukan cuma hostname. Port acak tiap start = origin baru
@@ -133,21 +150,40 @@ if (!gotLock) {
   // nyaris instan, jadi percobaan ulang beberapa puluh ms kemudian nyaris
   // pasti sudah lewat dari celahnya.
   function serveContentFile(filePath, res, attemptsLeft) {
-    fs.readFile(filePath, (err, data) => {
-      if (err) {
-        if (err.code === 'ENOENT' && attemptsLeft > 0) {
-          setTimeout(() => serveContentFile(filePath, res, attemptsLeft - 1), 40);
+    // FIXED 4 Sep 2026 (audit put-18, KRITIS): fs.readFile() BISA throw
+    // SECARA SINKRON (bukan lewat callback err) kalau filePath mengandung
+    // null byte atau karakter tak valid lain utk path OS -- dikonfirmasi
+    // lewat pengujian langsung. Path traversal biasa (../) SUDAH ditolak
+    // oleh pengecekan containment di startContentServer() SEBELUM fungsi
+    // ini dipanggil, tapi null byte (mis. request ke "/%00") LOLOS
+    // pengecekan itu (path.relative/path.join tak menganggapnya path
+    // traversal) & baru meledak DI SINI. Tanpa try/catch, exception ini
+    // UNCAUGHT di request handler http server -- mematikan SELURUH app
+    // Electron seketika, bisa dipicu dari tab browser BIASA APA PUN yg
+    // kebetulan terbuka di laptop yg sama (server ini dengar 127.0.0.1
+    // tanpa autentikasi), tak perlu app Gloria sendiri terlibat sama sekali.
+    try {
+      fs.readFile(filePath, (err, data) => {
+        if (err) {
+          if (err.code === 'ENOENT' && attemptsLeft > 0) {
+            setTimeout(() => serveContentFile(filePath, res, attemptsLeft - 1), 40);
+            return;
+          }
+          try { res.writeHead(404); res.end('Not found'); } catch (e) {}
           return;
         }
-        res.writeHead(404); res.end('Not found'); return;
-      }
-      res.writeHead(200, {
-        'Content-Type': CONTENT_MIME[path.extname(filePath)] || 'application/octet-stream',
-        'X-Frame-Options': 'DENY',
-        'Content-Security-Policy': "frame-ancestors 'none'",
+        try {
+          res.writeHead(200, {
+            'Content-Type': CONTENT_MIME[path.extname(filePath)] || 'application/octet-stream',
+            'X-Frame-Options': 'DENY',
+            'Content-Security-Policy': "frame-ancestors 'none'",
+          });
+          res.end(data);
+        } catch (e) {}
       });
-      res.end(data);
-    });
+    } catch (e) {
+      try { res.writeHead(400); res.end('Bad request'); } catch (e2) {}
+    }
   }
 
   async function startContentServer() {
