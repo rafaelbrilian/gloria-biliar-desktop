@@ -20,6 +20,7 @@ const { app, BrowserWindow, Menu, session, dialog, shell, ipcMain } = require('e
 const path = require('path');
 const http = require('http');
 const fs = require('fs');
+const { execFile } = require('child_process'); // 11 Sep 2026: dipakai setupWifiHandlers() -- netsh (Windows) via argv array, bukan shell string
 const { autoUpdater } = require('electron-updater');
 const { buildContentBundle } = require('./scripts/build-offline-bundle.js');
 
@@ -27,6 +28,7 @@ const SEED_BUNDLE_DIR = path.join(__dirname, 'offline-bundle'); // dibundel ke i
 const CONTENT_CACHE_DIR = path.join(app.getPath('userData'), 'content-cache'); // AKTIF, dipakai server statis
 const CONTENT_STAGING_DIR = path.join(app.getPath('userData'), 'content-cache-staging'); // unduhan sementara sblm ditukar
 const CONTENT_BACKUP_DIR = path.join(app.getPath('userData'), 'content-cache-backup'); // jaring pengaman saat proses tukar
+const WIFI_CONFIG_PATH = path.join(app.getPath('userData'), 'wifi-config.json'); // 11 Sep 2026: simpan nama profil "WiFi Toko" -- LOKAL per-mesin, SENGAJA tak ikut settings/saveData() (bukan data bisnis, tak perlu/boleh disinkron lintas device)
 const CONTENT_MIME = { '.html': 'text/html', '.js': 'text/javascript', '.json': 'application/json' };
 
 // FIXED 4 Sep 2026 (audit put-18): jaring pengaman TERAKHIR -- SEBELUMNYA
@@ -570,6 +572,108 @@ if (!gotLock) {
     });
   }
 
+  // ── Koneksi WiFi Toko (11 Sep 2026) ───────────────────────────────────────
+  // App ini didesain 100% offline utk operasional (lihat komentar besar di
+  // puncak file) -- WiFi kasir SENGAJA tak selalu tersambung. Staf minta cara
+  // CEPAT menyambungkan ke WiFi toko dari DALAM app (tanpa keluar ke
+  // Pengaturan Windows) saat perlu sinkron cloud/absen atau update konten.
+  // Scope SENGAJA dibatasi ke "sambung ke profil WiFi yg SUDAH dikenal
+  // Windows" (SSID+password sudah pernah disimpan manual sebelumnya lewat
+  // Pengaturan Windows) -- BUKAN scan+masukkan password baru (jauh lebih
+  // kompleks: perlu bikin profil XML baru, tangani password mentah di UI,
+  // risiko jauh lebih tinggi di PC produksi). netsh dipakai via execFile
+  // (argv ARRAY, BUKAN string shell) -- nama profil apa pun (spasi/karakter
+  // aneh) aman terkirim apa adanya, tanpa perlu escaping manual & tanpa
+  // celah injeksi shell sama sekali.
+  function _netshRun(args) {
+    return new Promise((resolve) => {
+      execFile('netsh', args, { windowsHide: true, timeout: 10000 }, (err, stdout, stderr) => {
+        resolve({ ok: !err, stdout: stdout || '', stderr: (stderr || (err ? String(err.message || err) : '')) });
+      });
+    });
+  }
+  // Parsing TAHAN locale -- Windows menerjemahkan label netsh ("All User
+  // Profile" bisa jadi "Semua Profil Pengguna" dst tergantung bahasa OS),
+  // jadi JANGAN cocokkan teks label Inggris. Baris nama profil SELALU
+  // berindentasi & py ':' -- ambil bagian SETELAH ':' TERAKHIR pada baris
+  // begitu, bukan cocokkan label persis.
+  function _parseWlanProfiles(stdout) {
+    const names = [];
+    stdout.split(/\r?\n/).forEach((line) => {
+      if (!/^\s+\S/.test(line)) return; // baris header/pemisah/kosong -- profil SELALU berindentasi
+      const idx = line.lastIndexOf(':');
+      if (idx < 0) return;
+      const name = line.slice(idx + 1).trim();
+      if (name && name !== '<None>' && names.indexOf(name) === -1) names.push(name);
+    });
+    return names;
+  }
+  // "SSID" & nilainya SENDIRI tak diterjemahkan Windows versi mana pun yg
+  // diketahui -- lebih aman dijadikan penanda dibanding field "State" (nama
+  // labelnya BISA diterjemahkan). Baris SSID cuma tampil kalau BENAR2
+  // tersambung (dikonfirmasi lgs dari output nyata netsh wlan show interfaces).
+  function _parseWlanInterfaceStatus(stdout) {
+    const m = stdout.match(/^\s*SSID\s*:\s*(.+?)\s*$/mi);
+    return { connected: !!(m && m[1]), ssid: (m && m[1]) || null };
+  }
+  function _wifiConfigRead() {
+    try { return JSON.parse(fs.readFileSync(WIFI_CONFIG_PATH, 'utf8')) || {}; } catch (e) { return {}; }
+  }
+  function _wifiConfigWrite(obj) {
+    try { fs.writeFileSync(WIFI_CONFIG_PATH, JSON.stringify(obj)); } catch (e) {}
+  }
+  function setupWifiHandlers() {
+    // netsh murni Windows -- platform lain (dev di Mac/Linux) dapat jawaban
+    // "tak didukung" yg konsisten, tak pernah crash.
+    if (process.platform !== 'win32') {
+      ipcMain.handle('wifi-list-profiles', async () => ({ ok: false, profiles: [], error: 'Hanya didukung di Windows' }));
+      ipcMain.handle('wifi-status', async () => ({ ok: false, connected: false, ssid: null }));
+      ipcMain.handle('wifi-connect', async () => ({ ok: false, error: 'Hanya didukung di Windows' }));
+      ipcMain.handle('wifi-get-saved-profile', async () => null);
+      ipcMain.handle('wifi-set-saved-profile', async () => ({ ok: true }));
+      return;
+    }
+    ipcMain.handle('wifi-list-profiles', async () => {
+      const r = await _netshRun(['wlan', 'show', 'profiles']);
+      if (!r.ok) return { ok: false, profiles: [], error: r.stderr || 'gagal menjalankan netsh' };
+      return { ok: true, profiles: _parseWlanProfiles(r.stdout) };
+    });
+    ipcMain.handle('wifi-status', async () => {
+      const r = await _netshRun(['wlan', 'show', 'interfaces']);
+      if (!r.ok) return { ok: false, connected: false, ssid: null };
+      const parsed = _parseWlanInterfaceStatus(r.stdout);
+      return { ok: true, connected: parsed.connected, ssid: parsed.ssid };
+    });
+    ipcMain.handle('wifi-connect', async (_event, profileName) => {
+      if (!profileName || typeof profileName !== 'string') return { ok: false, error: 'Nama profil WiFi kosong' };
+      const connect = await _netshRun(['wlan', 'connect', 'name=' + profileName, 'ssid=' + profileName]);
+      if (!connect.ok) return { ok: false, error: connect.stderr || connect.stdout || 'gagal menjalankan netsh connect' };
+      // "Connection request was completed successfully" dari netsh CUMA berarti
+      // permintaan DITERIMA, BUKAN jaminan sungguh tersambung (asosiasi WiFi
+      // butuh waktu, bisa jg gagal auth belakangan kalau password di profil
+      // sudah kedaluwarsa) -- poll status sungguhan sampai ~8 detik.
+      for (let i = 0; i < 8; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const st = await _netshRun(['wlan', 'show', 'interfaces']);
+        if (st.ok) {
+          const parsed = _parseWlanInterfaceStatus(st.stdout);
+          if (parsed.connected && parsed.ssid === profileName) return { ok: true, ssid: parsed.ssid };
+        }
+      }
+      return { ok: false, error: 'Perintah sambung sudah dikirim, tapi belum benar-benar tersambung ke "' + profileName + '" setelah beberapa detik. Cek jarak/sinyal, atau profil ini mungkin kedaluwarsa (password router berubah) -- sambungkan manual sekali lewat Pengaturan Windows dulu.' };
+    });
+    ipcMain.handle('wifi-get-saved-profile', async () => {
+      const cfg = _wifiConfigRead();
+      return cfg.savedProfile || null;
+    });
+    ipcMain.handle('wifi-set-saved-profile', async (_event, profileName) => {
+      const cfg = _wifiConfigRead();
+      cfg.savedProfile = (typeof profileName === 'string' && profileName) ? profileName : null;
+      _wifiConfigWrite(cfg);
+      return { ok: true };
+    });
+  }
+
   // ── Menu minimal -- TETAP sertakan Toggle DevTools & Reload, keduanya
   // terbukti krusial malam ini utk diagnosa langsung lewat Console kalau
   // ada masalah sinkron/lampu di kemudian hari. Jangan dihapus. ──
@@ -653,6 +757,7 @@ if (!gotLock) {
     setupSerialPermissions();
     setupSilentDownloads();
     setupSilentPrinting();
+    setupWifiHandlers();
     setupMenu();
     createWindow();
 
